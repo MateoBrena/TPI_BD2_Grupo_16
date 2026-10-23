@@ -43,4 +43,30 @@ BEGIN
     RETURN ISNULL(@Total, 0);
 END;
 GO
+-- -------------------------------------------------------------
+-- fn_TotalComprasCliente
+-- Devuelve el total comprado por un cliente. Solo cuenta pedidos
+-- Confirmados y Entregados (regla de los reportes de ventas): un
+-- pedido Pendiente todavía no es una venta cerrada y uno Cancelado
+-- se dio de baja.
+-- Devuelve 0 si el cliente no tiene compras que cuenten o no existe.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.fn_TotalComprasCliente', 'FN') IS NOT NULL
+    DROP FUNCTION dbo.fn_TotalComprasCliente;
+GO
 
+CREATE FUNCTION dbo.fn_TotalComprasCliente (@IdCliente INT)
+RETURNS DECIMAL(12,2)
+AS
+BEGIN
+    DECLARE @Total DECIMAL(12,2);
+
+    SELECT @Total = SUM(DP.Cantidad * DP.PrecioUnitario)
+    FROM Pedidos AS P
+    INNER JOIN DetallePedido AS DP ON DP.IdPedido = P.IdPedido
+    WHERE P.IdCliente = @IdCliente
+      AND P.Estado IN ('Confirmado', 'Entregado');
+
+    RETURN ISNULL(@Total, 0);
+END;
+GO
