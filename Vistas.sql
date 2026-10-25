@@ -57,3 +57,28 @@ LEFT JOIN Pedidos AS PE
    AND PE.Estado IN ('Confirmado', 'Entregado')
 GROUP BY CL.IdCliente, CL.Nombre, CL.Apellido;
 GO
+
+-- -------------------------------------------------------------
+-- vi_StockDisponible
+-- Por producto, las tres miradas del stock:
+--   Disponible   = Stock de Productos (lo que se puede vender)
+--   Comprometido = unidades en pedidos Pendientes o Confirmados
+--                  (calculado con fn_StockComprometido)
+--   Fisico       = Disponible + Comprometido (lo que hay en depósito)
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.vi_StockDisponible', 'V') IS NOT NULL
+    DROP VIEW dbo.vi_StockDisponible;
+GO
+
+CREATE VIEW dbo.vi_StockDisponible
+AS
+SELECT
+    P.IdProducto,
+    M.Nombre                                        AS Marca,
+    P.Modelo,
+    P.Stock                                         AS Disponible,
+    dbo.fn_StockComprometido(P.IdProducto)          AS Comprometido,
+    P.Stock + dbo.fn_StockComprometido(P.IdProducto) AS Fisico
+FROM Productos AS P
+INNER JOIN Marcas AS M ON M.IdMarca = P.IdMarca;
+GO
