@@ -70,3 +70,34 @@ BEGIN
     RETURN ISNULL(@Total, 0);
 END;
 GO
+
+-- -------------------------------------------------------------
+-- fn_StockComprometido
+-- Devuelve las unidades de un producto que están en pedidos
+-- Pendientes o Confirmados: ya se descontaron del Stock (reservadas)
+-- pero todavía no salieron del depósito.
+-- Es solo un cálculo de consulta: no mueve stock.
+--   Stock (Productos)     = disponible para vender
+--   Stock + comprometido  = físico en depósito
+-- No cuenta pedidos Entregados (ya salieron) ni Cancelados (se repusieron).
+-- Devuelve 0 si el producto no está en pedidos abiertos.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.fn_StockComprometido', 'FN') IS NOT NULL
+    DROP FUNCTION dbo.fn_StockComprometido;
+GO
+
+CREATE FUNCTION dbo.fn_StockComprometido (@IdProducto INT)
+RETURNS INT
+AS
+BEGIN
+    DECLARE @Comprometido INT;
+
+    SELECT @Comprometido = SUM(DP.Cantidad)
+    FROM DetallePedido AS DP
+    INNER JOIN Pedidos AS P ON P.IdPedido = DP.IdPedido
+    WHERE DP.IdProducto = @IdProducto
+      AND P.Estado IN ('Pendiente', 'Confirmado');
+
+    RETURN ISNULL(@Comprometido, 0);
+END;
+GO
