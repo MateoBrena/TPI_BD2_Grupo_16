@@ -82,3 +82,51 @@ SELECT
 FROM Productos AS P
 INNER JOIN Marcas AS M ON M.IdMarca = P.IdMarca;
 GO
+-- -------------------------------------------------------------
+-- vi_ProductosBajoStock
+-- Productos activos cuyo stock disponible llegó a su stock mínimo
+-- o está por debajo. Indica qué hay que reponer.
+-- Los productos inactivos no se muestran porque ya no se venden.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.vi_ProductosBajoStock', 'V') IS NOT NULL
+    DROP VIEW dbo.vi_ProductosBajoStock;
+GO
+
+CREATE VIEW dbo.vi_ProductosBajoStock
+AS
+SELECT
+    P.IdProducto,
+    C.Nombre    AS Categoria,
+    M.Nombre    AS Marca,
+    P.Modelo,
+    P.Stock,
+    P.StockMinimo
+FROM Productos AS P
+INNER JOIN Categorias AS C ON C.IdCategoria = P.IdCategoria
+INNER JOIN Marcas     AS M ON M.IdMarca     = P.IdMarca
+WHERE P.Activo = 1
+  AND P.Stock <= P.StockMinimo;
+GO
+-- -------------------------------------------------------------
+-- vi_VentasPorCategoria
+-- Unidades y monto vendidos por categoría. Solo cuenta pedidos
+-- Confirmados y Entregados. Usa el precio guardado en DetallePedido.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.vi_VentasPorCategoria', 'V') IS NOT NULL
+    DROP VIEW dbo.vi_VentasPorCategoria;
+GO
+
+CREATE VIEW dbo.vi_VentasPorCategoria
+AS
+SELECT
+    C.IdCategoria,
+    C.Nombre                                AS Categoria,
+    SUM(DP.Cantidad)                        AS UnidadesVendidas,
+    SUM(DP.Cantidad * DP.PrecioUnitario)    AS MontoVendido
+FROM DetallePedido AS DP
+INNER JOIN Pedidos    AS PE ON PE.IdPedido   = DP.IdPedido
+INNER JOIN Productos  AS P  ON P.IdProducto  = DP.IdProducto
+INNER JOIN Categorias AS C  ON C.IdCategoria = P.IdCategoria
+WHERE PE.Estado IN ('Confirmado', 'Entregado')
+GROUP BY C.IdCategoria, C.Nombre;
+GO

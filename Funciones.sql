@@ -101,3 +101,27 @@ BEGIN
     RETURN ISNULL(@Comprometido, 0);
 END;
 GO
+-- -------------------------------------------------------------
+-- fn_TotalCompra
+-- Devuelve el total de una compra: suma de Cantidad x CostoUnitario
+-- de su detalle (costo del momento de la compra).
+-- No filtra por estado: calcula el total de cualquier compra.
+-- Devuelve 0 si la compra no tiene productos o no existe.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.fn_TotalCompra', 'FN') IS NOT NULL
+    DROP FUNCTION dbo.fn_TotalCompra;
+GO
+
+CREATE FUNCTION dbo.fn_TotalCompra (@IdCompra INT)
+RETURNS DECIMAL(12,2)
+AS
+BEGIN
+    DECLARE @Total DECIMAL(12,2);
+
+    SELECT @Total = SUM(DC.Cantidad * DC.CostoUnitario)
+    FROM DetalleCompra AS DC
+    WHERE DC.IdCompra = @IdCompra;
+
+    RETURN ISNULL(@Total, 0);
+END;
+GO
