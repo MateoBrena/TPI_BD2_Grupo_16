@@ -1,4 +1,4 @@
-﻿-- =============================================================
+-- =============================================================
 -- UTN Hardware - Creación de la base de datos y sus tablas
 -- Base de Datos II - Equipo 16
 -- Ejecutar antes que Datos.sql. Si la base ya existe, la elimina
@@ -74,6 +74,15 @@ CREATE TABLE Clientes (
 );
 GO
 
+-- Stock es un dato derivado: se podría calcular sumando los movimientos
+-- de MovimientosStock. Se guarda a propósito (redundancia controlada):
+--   - se consulta todo el tiempo: en cada venta, en la vista de bajo
+--     stock y en la app;
+--   - permite el CHECK Stock >= 0, última barrera para no vender lo que
+--     no hay.
+-- Para que nunca se desincronicen, el stock solo lo modifican los
+-- triggers, que en la misma operación actualizan Stock y registran el
+-- movimiento.
 CREATE TABLE Productos (
     IdProducto  INT IDENTITY(1,1) NOT NULL,
     IdCategoria INT NOT NULL,
@@ -103,7 +112,10 @@ CREATE TABLE Compras (
     CONSTRAINT PK_Compras PRIMARY KEY (IdCompra),
     CONSTRAINT FK_Compras_Proveedores FOREIGN KEY (IdProveedor)
         REFERENCES Proveedores (IdProveedor),
-    CONSTRAINT CK_Compras_Estado CHECK (Estado IN ('Pendiente', 'Recibida', 'Anulada'))
+    CONSTRAINT CK_Compras_Estado CHECK (Estado IN ('Pendiente', 'Recibida', 'Anulada')),
+    -- Una misma factura del proveedor no se puede cargar dos veces. Va con
+    -- el proveedor porque dos proveedores pueden usar el mismo número.
+    CONSTRAINT UQ_Compras_Proveedor_Factura UNIQUE (IdProveedor, NroFactura)
 );
 GO
 
