@@ -2,6 +2,9 @@
 -- PRUEBAS DE FUNCIONES
 -- =============================================================================
 
+USE UTN_Hardware;
+GO
+
 SELECT dbo.fn_TotalPedido(1);          -- 555000.00
 SELECT dbo.fn_TotalPedido(5);          -- 930000.00
 SELECT dbo.fn_TotalPedido(4);          -- 980000.00 (cancelado: igual calcula el total)
@@ -65,3 +68,28 @@ SELECT SUM(Total) FROM vi_ComprasResumen;
 -- 18.178.000: tiene que coincidir con SUM(Cantidad * CostoUnitario) de DetalleCompra
 SELECT SUM(Cantidad * CostoUnitario) FROM DetalleCompra;
 -- 18.178.000
+
+-- =============================================================================
+-- Pruebas de Procedimientos de reporte (no modifican datos)
+-- =============================================================================
+
+EXEC pa_VentasPorPeriodo '2026-09-01', '2026-09-30';
+-- 9 filas (productos de los pedidos 1, 2, 3 y 5). La suma de MontoVendido da 2.315.000.
+-- No aparece la RX 7800 XT (pedido 4, Cancelado).
+
+EXEC pa_VentasPorPeriodo '2026-10-01', '2026-10-31';
+-- 2 filas: Core i5-14400F 480.000 (2 u.) y NV2 110.000 (2 u.). Total 590.000.
+-- No incluye los pedidos 7 y 8 (Pendientes).
+
+EXEC pa_VentasPorPeriodo '2026-09-10', '2026-09-10';
+-- 3 filas del pedido 1 (Ryzen 5, Fury Beast, 990 EVO). Total 555.000.
+-- El pedido es de las 14:20: prueba que Hasta se incluye completo.
+
+EXEC pa_VentasPorPeriodo '2026-08-01', '2026-08-31';
+-- 0 filas, sin error (período sin ventas).
+
+EXEC pa_VentasPorPeriodo '2026-10-31', '2026-10-01';
+-- Error 50002: Rango de fechas inválido.
+
+EXEC pa_VentasPorPeriodo NULL, '2026-10-31';
+-- Error 50001: Las fechas Desde y Hasta son obligatorias.
