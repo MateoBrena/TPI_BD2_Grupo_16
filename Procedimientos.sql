@@ -105,3 +105,68 @@ BEGIN
     ORDER BY CO.Fecha;
 END;
 GO
+-- =============================================================
+-- PARTE 4 - RECEPCIÓN DE COMPRAS
+-- Se trabaja junto con el trigger tr_Compras_Update (Triggers.sql):
+-- el procedimiento valida y cambia el estado; el trigger suma el
+-- stock y registra los movimientos.
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- pa_RecibirCompra
+-- Marca una compra como Recibida cuando llega la mercadería.
+-- Validaciones (cada una con su mensaje):
+--   - la compra existe,
+--   - no fue recibida antes,
+--   - no está anulada,
+--   - tiene al menos un producto.
+-- El UPDATE se hace dentro de una transacción. Al cambiar el estado
+-- se dispara tr_Compras_Update, que suma el stock: si algo falla,
+-- se deshace todo y la compra sigue Pendiente.
+-- El procedimiento no toca el stock directamente; así la regla vive
+-- en un solo lugar (el trigger) y un UPDATE manual funciona igual.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.pa_RecibirCompra', 'P') IS NOT NULL
+    DROP PROCEDURE dbo.pa_RecibirCompra;
+GO
+
+CREATE PROCEDURE dbo.pa_RecibirCompra
+    @IdCompra INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Estado VARCHAR(20);
+
+    SELECT @Estado = Estado
+    FROM Compras
+    WHERE IdCompra = @IdCompra;
+
+    IF @Estado IS NULL
+        THROW 50020, 'La compra no existe.', 1;
+
+    IF @Estado = 'Recibida'
+        THROW 50021, 'La compra ya fue recibida.', 1;
+
+    IF @Estado = 'Anulada'
+        THROW 50022, 'No se puede recibir una compra anulada.', 1;
+
+    IF NOT EXISTS (SELECT 1 FROM DetalleCompra WHERE IdCompra = @IdCompra)
+        THROW 50023, 'La compra no tiene productos.', 1;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        UPDATE Compras
+        SET Estado = 'Recibida'
+        WHERE IdCompra = @IdCompra;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH;
+END;
+GO
