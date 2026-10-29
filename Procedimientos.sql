@@ -65,3 +65,43 @@ BEGIN
 END;
 GO
 
+-- -------------------------------------------------------------
+-- pa_ComprasPorPeriodo
+-- Compras a proveedores entre dos fechas, con proveedor, factura,
+-- estado y total (calculado con fn_TotalCompra).
+-- Muestra todas las compras, en cualquier estado (Recibida,
+-- Pendiente o Anulada): el reporte es un listado de lo que se
+-- registró en el período, y la columna Estado permite distinguirlas.
+-- Ordena por fecha.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.pa_ComprasPorPeriodo', 'P') IS NOT NULL
+    DROP PROCEDURE dbo.pa_ComprasPorPeriodo;
+GO
+
+CREATE PROCEDURE dbo.pa_ComprasPorPeriodo
+    @Desde DATE,
+    @Hasta DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @Desde IS NULL OR @Hasta IS NULL
+        THROW 50001, 'Las fechas Desde y Hasta son obligatorias.', 1;
+
+    IF @Desde > @Hasta
+        THROW 50002, 'Rango de fechas inválido: Desde no puede ser mayor que Hasta.', 1;
+
+    SELECT
+        CO.IdCompra,
+        CO.Fecha,
+        PR.RazonSocial                  AS Proveedor,
+        CO.NroFactura,
+        CO.Estado,
+        dbo.fn_TotalCompra(CO.IdCompra) AS Total
+    FROM Compras AS CO
+    INNER JOIN Proveedores AS PR ON PR.IdProveedor = CO.IdProveedor
+    WHERE CO.Fecha >= @Desde
+      AND CO.Fecha <  DATEADD(DAY, 1, @Hasta)
+    ORDER BY CO.Fecha;
+END;
+GO
