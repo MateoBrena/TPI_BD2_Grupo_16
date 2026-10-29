@@ -93,3 +93,6 @@ EXEC pa_VentasPorPeriodo '2026-10-31', '2026-10-01';
 
 EXEC pa_VentasPorPeriodo NULL, '2026-10-31';
 -- Error 50001: Las fechas Desde y Hasta son obligatorias.
+
+EXEC pa_VentasPorPeriodo NULL, '2026-10-31';
+-- Error 50001: Las fechas Desde y Hasta son obligatorias.
