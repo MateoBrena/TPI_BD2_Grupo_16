@@ -90,3 +90,83 @@ BEGIN
       AND I.Estado = 'Recibida';
 END;
 GO
+
+-- =============================================================
+-- PARTE 5 - TRIGGERS DE PEDIDOS
+-- El stock se reserva al agregar un producto al pedido (no al
+-- confirmarlo), para no vender dos veces la misma unidad. Cada
+-- cambio de stock se registra en MovimientosStock en la misma
+-- operación, así Stock y el historial nunca se desincronizan.
+-- Solo se agregan o quitan productos de un pedido Pendiente.
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- tr_Pedidos_Update
+-- Se dispara al modificar pedidos.
+-- 1) Valida las transiciones de estado. Solo se permiten:
+--      Pendiente  -> Confirmado
+--      Confirmado -> Entregado
+--      Pendiente  -> Cancelado
+--      Confirmado -> Cancelado
+--    Entregado y Cancelado son finales. Si un pedido Cancelado
+--    pudiera volver a Pendiente, se podría cancelar dos veces y el
+--    stock se repondría dos veces. Si alguna fila no cumple, se
+--    deshace toda la operación.
+-- 2) Para cada pedido que pasa a Cancelado:
+--      - repone el stock de todos sus productos,
+--      - registra un Ingreso con origen Cancelación por cada uno.
+--    El pedido y su detalle no se borran: la venta cancelada queda
+--    registrada.
+-- Confirmar o entregar no mueve el stock: ya se descontó al agregar
+-- los productos. Las filas que no cambian de estado (por ejemplo,
+-- si solo se corrige la dirección de envío) no se tocan.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.tr_Pedidos_Update', 'TR') IS NOT NULL
+    DROP TRIGGER dbo.tr_Pedidos_Update;
+GO
+
+CREATE TRIGGER dbo.tr_Pedidos_Update
+ON Pedidos
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- 1) Transiciones no permitidas
+    IF EXISTS (
+        SELECT 1
+        FROM inserted AS I
+        INNER JOIN deleted AS D ON D.IdPedido = I.IdPedido
+        WHERE I.Estado <> D.Estado
+          AND NOT (   (D.Estado = 'Pendiente'  AND I.Estado IN ('Confirmado', 'Cancelado'))
+                   OR (D.Estado = 'Confirmado' AND I.Estado IN ('Entregado', 'Cancelado')))
+    )
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50034, 'Transición de estado no permitida: Pendiente -> Confirmado -> Entregado, o Pendiente/Confirmado -> Cancelado. Entregado y Cancelado son finales.', 1;
+    END;
+
+    -- 2a) Reponer el stock de los pedidos cancelados (agrupado por producto)
+    UPDATE P
+    SET P.Stock = P.Stock + R.Cantidad
+    FROM Productos AS P
+    INNER JOIN (
+        SELECT DP.IdProducto, SUM(DP.Cantidad) AS Cantidad
+        FROM inserted AS I
+        INNER JOIN deleted       AS D  ON D.IdPedido  = I.IdPedido
+        INNER JOIN DetallePedido AS DP ON DP.IdPedido = I.IdPedido
+        WHERE D.Estado <> 'Cancelado'
+          AND I.Estado = 'Cancelado'
+        GROUP BY DP.IdProducto
+    ) AS R ON R.IdProducto = P.IdProducto;
+
+    -- 2b) Registrar un Ingreso por cada producto de cada pedido cancelado
+    INSERT INTO MovimientosStock (IdProducto, IdCompra, IdPedido, Fecha, Tipo, Origen, Cantidad)
+    SELECT DP.IdProducto, NULL, DP.IdPedido, GETDATE(), 'Ingreso', 'Cancelación', DP.Cantidad
+    FROM inserted AS I
+    INNER JOIN deleted       AS D  ON D.IdPedido  = I.IdPedido
+    INNER JOIN DetallePedido AS DP ON DP.IdPedido = I.IdPedido
+    WHERE D.Estado <> 'Cancelado'
+      AND I.Estado = 'Cancelado';
+END;
+GO
