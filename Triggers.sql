@@ -170,3 +170,143 @@ BEGIN
       AND I.Estado = 'Cancelado';
 END;
 GO
+
+-- -------------------------------------------------------------
+-- tr_DetallePedido_Insert
+-- Se dispara al agregar productos a un pedido.
+-- 1) Valida, en este orden (si alguna fila no cumple, se deshace
+--    toda la operación):
+--      - el pedido está Pendiente,
+--      - el producto está activo,
+--      - hay stock suficiente. Se agrupa por producto: si una misma
+--        sentencia agrega el mismo producto a varios pedidos, se
+--        controla la suma de todas las unidades.
+-- 2) Descuenta el stock y registra un Egreso con origen Venta por
+--    cada producto agregado.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.tr_DetallePedido_Insert', 'TR') IS NOT NULL
+    DROP TRIGGER dbo.tr_DetallePedido_Insert;
+GO
+
+CREATE TRIGGER dbo.tr_DetallePedido_Insert
+ON DetallePedido
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Mensaje NVARCHAR(2048);
+
+    -- 1a) El pedido tiene que estar Pendiente
+    SELECT TOP (1) @Mensaje = CONCAT('Solo se pueden agregar productos a un pedido Pendiente. ',
+                                     'El pedido ', PE.IdPedido, ' está ', PE.Estado, '.')
+    FROM inserted AS I
+    INNER JOIN Pedidos AS PE ON PE.IdPedido = I.IdPedido
+    WHERE PE.Estado <> 'Pendiente';
+
+    IF @Mensaje IS NOT NULL
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50030, @Mensaje, 1;
+    END;
+
+    -- 1b) El producto tiene que estar activo
+    SELECT TOP (1) @Mensaje = CONCAT('No se puede vender un producto inactivo: ', P.Modelo, '.')
+    FROM inserted AS I
+    INNER JOIN Productos AS P ON P.IdProducto = I.IdProducto
+    WHERE P.Activo = 0;
+
+    IF @Mensaje IS NOT NULL
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50031, @Mensaje, 1;
+    END;
+
+    -- 1c) Tiene que haber stock suficiente
+    SELECT TOP (1) @Mensaje = CONCAT('Stock insuficiente para ', P.Modelo,
+                                     ': disponible ', P.Stock, ', solicitado ', R.Cantidad, '.')
+    FROM Productos AS P
+    INNER JOIN (
+        SELECT IdProducto, SUM(Cantidad) AS Cantidad
+        FROM inserted
+        GROUP BY IdProducto
+    ) AS R ON R.IdProducto = P.IdProducto
+    WHERE R.Cantidad > P.Stock;
+
+    IF @Mensaje IS NOT NULL
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50032, @Mensaje, 1;
+    END;
+
+    -- 2a) Descontar el stock (agrupado por producto)
+    UPDATE P
+    SET P.Stock = P.Stock - R.Cantidad
+    FROM Productos AS P
+    INNER JOIN (
+        SELECT IdProducto, SUM(Cantidad) AS Cantidad
+        FROM inserted
+        GROUP BY IdProducto
+    ) AS R ON R.IdProducto = P.IdProducto;
+
+    -- 2b) Registrar un Egreso por cada producto agregado
+    INSERT INTO MovimientosStock (IdProducto, IdCompra, IdPedido, Fecha, Tipo, Origen, Cantidad)
+    SELECT I.IdProducto, NULL, I.IdPedido, GETDATE(), 'Egreso', 'Venta', I.Cantidad
+    FROM inserted AS I;
+END;
+GO
+
+-- -------------------------------------------------------------
+-- tr_DetallePedido_Delete
+-- Se dispara al quitar productos de un pedido.
+-- 1) Solo se permite si el pedido está Pendiente. En un pedido
+--    Confirmado o Entregado el detalle ya no cambia, y en uno
+--    Cancelado el stock ya se repuso: quitarle productos lo
+--    repondría dos veces. Si alguna fila no cumple, se deshace todo.
+-- 2) Repone el stock y registra un Ingreso con origen Baja de ítem
+--    por cada producto quitado. No se borra el Egreso original: el
+--    historial no se modifica, se registra el movimiento contrario.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.tr_DetallePedido_Delete', 'TR') IS NOT NULL
+    DROP TRIGGER dbo.tr_DetallePedido_Delete;
+GO
+
+CREATE TRIGGER dbo.tr_DetallePedido_Delete
+ON DetallePedido
+AFTER DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Mensaje NVARCHAR(2048);
+
+    -- 1) El pedido tiene que estar Pendiente
+    SELECT TOP (1) @Mensaje = CONCAT('Solo se pueden quitar productos de un pedido Pendiente. ',
+                                     'El pedido ', PE.IdPedido, ' está ', PE.Estado, '.')
+    FROM deleted AS D
+    INNER JOIN Pedidos AS PE ON PE.IdPedido = D.IdPedido
+    WHERE PE.Estado <> 'Pendiente';
+
+    IF @Mensaje IS NOT NULL
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50033, @Mensaje, 1;
+    END;
+
+    -- 2a) Reponer el stock (agrupado por producto)
+    UPDATE P
+    SET P.Stock = P.Stock + R.Cantidad
+    FROM Productos AS P
+    INNER JOIN (
+        SELECT IdProducto, SUM(Cantidad) AS Cantidad
+        FROM deleted
+        GROUP BY IdProducto
+    ) AS R ON R.IdProducto = P.IdProducto;
+
+    -- 2b) Registrar un Ingreso por cada producto quitado
+    INSERT INTO MovimientosStock (IdProducto, IdCompra, IdPedido, Fecha, Tipo, Origen, Cantidad)
+    SELECT D.IdProducto, NULL, D.IdPedido, GETDATE(), 'Ingreso', 'Baja de ítem', D.Cantidad
+    FROM deleted AS D;
+END;
+GO
+
