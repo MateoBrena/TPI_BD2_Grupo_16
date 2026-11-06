@@ -310,3 +310,115 @@ BEGIN
 END;
 GO
 
+-- -------------------------------------------------------------
+-- tr_DetallePedido_Update
+-- Se dispara al modificar productos de un pedido. Permite sumar o
+-- restar unidades (como en un carrito de compras) sin quitar y
+-- volver a agregar el producto.
+-- 1) Valida, en este orden (si alguna fila no cumple, se deshace
+--    toda la operación):
+--      - no se cambia el pedido ni el producto de un ítem: eso es
+--        quitar uno y agregar otro (triggers de DELETE e INSERT);
+--      - el pedido está Pendiente;
+--      - si se aumenta la cantidad, el producto está activo (sumar
+--        unidades es vender más). Reducir sí se permite: libera stock;
+--      - si se aumenta la cantidad, hay stock suficiente para las
+--        unidades adicionales (agrupado por producto).
+-- 2) Mueve el stock solo por la diferencia entre la cantidad nueva y
+--    la anterior, y registra un movimiento por cada ítem modificado:
+--      - aumentó: Egreso con origen Venta por las unidades de más,
+--      - disminuyó: Ingreso con origen Baja de ítem por las de menos.
+--    Si la cantidad no cambia (por ejemplo, solo se corrige el
+--    precio), no se mueve el stock.
+-- Para dejar un producto en 0 unidades se quita del pedido (DELETE):
+-- el CHECK Cantidad > 0 no permite guardar una cantidad en 0.
+-- -------------------------------------------------------------
+IF OBJECT_ID('dbo.tr_DetallePedido_Update', 'TR') IS NOT NULL
+    DROP TRIGGER dbo.tr_DetallePedido_Update;
+GO
+
+CREATE TRIGGER dbo.tr_DetallePedido_Update
+ON DetallePedido
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Mensaje NVARCHAR(2048);
+
+    -- 1a) No se puede cambiar el pedido ni el producto de un ítem
+    IF UPDATE(IdPedido) OR UPDATE(IdProducto)
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50035, 'No se puede cambiar el pedido ni el producto de un ítem: hay que quitarlo y agregar el nuevo.', 1;
+    END;
+
+    -- 1b) El pedido tiene que estar Pendiente
+    SELECT TOP (1) @Mensaje = CONCAT('Solo se pueden modificar productos de un pedido Pendiente. ',
+                                     'El pedido ', PE.IdPedido, ' está ', PE.Estado, '.')
+    FROM inserted AS I
+    INNER JOIN Pedidos AS PE ON PE.IdPedido = I.IdPedido
+    WHERE PE.Estado <> 'Pendiente';
+
+    IF @Mensaje IS NOT NULL
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50036, @Mensaje, 1;
+    END;
+
+    -- 1c) Para aumentar la cantidad, el producto tiene que estar activo
+    SELECT TOP (1) @Mensaje = CONCAT('No se puede vender un producto inactivo: ', P.Modelo, '.')
+    FROM inserted AS I
+    INNER JOIN deleted   AS D ON D.IdPedido = I.IdPedido AND D.IdProducto = I.IdProducto
+    INNER JOIN Productos AS P ON P.IdProducto = I.IdProducto
+    WHERE I.Cantidad > D.Cantidad
+      AND P.Activo = 0;
+
+    IF @Mensaje IS NOT NULL
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50031, @Mensaje, 1;
+    END;
+
+    -- 1d) Tiene que haber stock para las unidades adicionales
+    SELECT TOP (1) @Mensaje = CONCAT('Stock insuficiente para ', P.Modelo,
+                                     ': disponible ', P.Stock, ', solicitado ', R.Diferencia, ' más.')
+    FROM Productos AS P
+    INNER JOIN (
+        SELECT I.IdProducto, SUM(I.Cantidad - D.Cantidad) AS Diferencia
+        FROM inserted AS I
+        INNER JOIN deleted AS D ON D.IdPedido = I.IdPedido AND D.IdProducto = I.IdProducto
+        GROUP BY I.IdProducto
+    ) AS R ON R.IdProducto = P.IdProducto
+    WHERE R.Diferencia > P.Stock;
+
+    IF @Mensaje IS NOT NULL
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50032, @Mensaje, 1;
+    END;
+
+    -- 2a) Mover el stock por la diferencia (agrupado por producto).
+    --     Diferencia positiva: se descuenta. Negativa: se repone.
+    UPDATE P
+    SET P.Stock = P.Stock - R.Diferencia
+    FROM Productos AS P
+    INNER JOIN (
+        SELECT I.IdProducto, SUM(I.Cantidad - D.Cantidad) AS Diferencia
+        FROM inserted AS I
+        INNER JOIN deleted AS D ON D.IdPedido = I.IdPedido AND D.IdProducto = I.IdProducto
+        GROUP BY I.IdProducto
+    ) AS R ON R.IdProducto = P.IdProducto
+    WHERE R.Diferencia <> 0;
+
+    -- 2b) Registrar un movimiento por cada ítem cuya cantidad cambió
+    INSERT INTO MovimientosStock (IdProducto, IdCompra, IdPedido, Fecha, Tipo, Origen, Cantidad)
+    SELECT I.IdProducto, NULL, I.IdPedido, GETDATE(),
+           CASE WHEN I.Cantidad > D.Cantidad THEN 'Egreso' ELSE 'Ingreso' END,
+           CASE WHEN I.Cantidad > D.Cantidad THEN 'Venta'  ELSE 'Baja de ítem' END,
+           ABS(I.Cantidad - D.Cantidad)
+    FROM inserted AS I
+    INNER JOIN deleted AS D ON D.IdPedido = I.IdPedido AND D.IdProducto = I.IdProducto
+    WHERE I.Cantidad <> D.Cantidad;
+END;
+GO
