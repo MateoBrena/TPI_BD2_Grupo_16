@@ -244,3 +244,375 @@ SELECT IdCompra, Estado FROM Compras WHERE IdCompra IN (1, 4);
 SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 4;
 -- RTX 4060 sigue en 4 (la compra 4 anulada no sumó stock)
 GO
+-- =============================================================================
+-- Pruebas de Triggers de pedidos (INSERT, DELETE y UPDATE en DetallePedido, UPDATE en Pedidos)
+-- Stock inicial de los productos que se usan:
+--   1 Ryzen 5 7600 = 9 · 2 Ryzen 7 7800X3D = 3 · 3 Core i5-14400F = 6 ·
+--   4 RTX 4060 = 4 · 9 NV2 = 13 · 12 G213 Prodigy = 7 · 13 Core i3 (inactivo) = 0
+-- Pedidos: 7 (Mateo) y 8 (Tomás) Pendientes · 6 Confirmado · 1 Entregado · 4 Cancelado
+--
+-- Los casos que deben fallar van cada uno en su propio lote (GO): el trigger
+-- deshace la operación y corta el lote. El error se ve en la pestaña Mensajes,
+-- a veces junto con el 3609 ("la transacción terminó en el desencadenador"),
+-- que es normal. Cada uno está entre BEGIN TRAN y ROLLBACK: si el trigger
+-- fallara y la operación se aceptara, el ROLLBACK la deshace igual.
+-- =============================================================================
+
+-- Prueba 4: dos clientes quieren el mismo producto (escenario del video)
+-- Esta prueba deja los pedidos y el stock como estaban, pero los movimientos
+-- quedan registrados en el historial, como pasaría en la realidad.
+SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 2;
+-- Ryzen 7 7800X3D = 3
+
+-- 4.1 Mateo agrega las 3 unidades a su pedido (7)
+INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+VALUES (7, 2, 3, 650000.00);
+SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 2;
+-- 0
+GO
+
+-- 4.2 Tomás intenta agregar 1 a su pedido (8)
+BEGIN TRAN;
+INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+VALUES (8, 2, 1, 650000.00);
+ROLLBACK;
+-- Error 50032: Stock insuficiente para Ryzen 7 7800X3D: disponible 0, solicitado 1.
+GO
+
+SELECT IdPedido, IdProducto, Cantidad FROM DetallePedido WHERE IdProducto = 2 AND IdPedido IN (7, 8);
+-- 1 fila: solo el pedido 7, con 3 unidades
+
+-- 4.3 Mateo quita el producto de su pedido: las unidades vuelven a estar disponibles
+DELETE FROM DetallePedido WHERE IdPedido = 7 AND IdProducto = 2;
+SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 2;
+-- 3
+
+-- 4.4 Ahora Tomás sí puede agregarlo
+INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+VALUES (8, 2, 1, 650000.00);
+SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 2;
+-- 2
+
+SELECT IdPedido, Tipo, Origen, Cantidad
+FROM MovimientosStock
+WHERE IdProducto = 2 AND IdPedido IN (7, 8)
+ORDER BY IdMovimiento;
+-- 3 filas: pedido 7 Egreso Venta 3 · pedido 7 Ingreso Baja de ítem 3 · pedido 8 Egreso Venta 1
+-- (si la prueba ya se ejecutó antes, aparecen también las filas de esas ejecuciones)
+
+-- 4.5 Limpieza: Tomás también lo quita, para dejar el pedido como estaba
+DELETE FROM DetallePedido WHERE IdPedido = 8 AND IdProducto = 2;
+SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 2;
+-- 3
+GO
+
+-- Prueba 5: varias filas en una misma sentencia
+BEGIN TRAN;
+
+    -- Un solo INSERT con dos productos
+    INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario) VALUES
+        (7, 1, 2, 285000.00),
+        (7, 9, 1, 55000.00);
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto IN (1, 9);
+    -- Ryzen 5 7600 = 7 (9 - 2) · NV2 = 12 (13 - 1)
+
+    -- El mismo producto en dos pedidos a la vez: se descuenta la suma
+    INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario) VALUES
+        (7, 12, 1, 70000.00),
+        (8, 12, 2, 70000.00);
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 12;
+    -- G213 Prodigy = 4 (7 - 1 - 2)
+
+    SELECT IdPedido, IdProducto, Tipo, Origen, Cantidad
+    FROM MovimientosStock
+    WHERE IdPedido IN (7, 8) AND IdProducto IN (1, 9, 12);
+    -- 4 filas, todas Egreso Venta: (7,1,2) · (7,9,1) · (7,12,1) · (8,12,2)
+
+    -- Un solo DELETE que quita los tres productos agregados al pedido 7
+    DELETE FROM DetallePedido WHERE IdPedido = 7 AND IdProducto IN (1, 9, 12);
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto IN (1, 9, 12);
+    -- Ryzen 5 7600 = 9 · NV2 = 13 · G213 Prodigy = 5 (siguen reservadas las 2 del pedido 8)
+
+    SELECT dbo.fn_StockComprometido(12);
+    -- 2 (pedido 8, Pendiente)
+
+    -- Control: el stock coincide con los movimientos
+    SELECT P.IdProducto, P.Modelo, P.Stock, ISNULL(M.Saldo, 0) AS SaldoMovimientos
+    FROM Productos AS P
+    LEFT JOIN (
+        SELECT IdProducto,
+               SUM(CASE WHEN Tipo = 'Ingreso' THEN Cantidad ELSE -Cantidad END) AS Saldo
+        FROM MovimientosStock
+        GROUP BY IdProducto
+    ) AS M ON M.IdProducto = P.IdProducto
+    WHERE P.Stock <> ISNULL(M.Saldo, 0);
+    -- 0 filas
+
+ROLLBACK;
+GO
+
+-- Prueba 6: altas y bajas que deben fallar
+BEGIN TRAN;
+INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+VALUES (1, 9, 1, 55000.00);
+ROLLBACK;
+-- Error 50030: Solo se pueden agregar productos a un pedido Pendiente. El pedido 1 está Entregado.
+GO
+
+BEGIN TRAN;
+INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+VALUES (6, 9, 1, 55000.00);
+ROLLBACK;
+-- Error 50030: ... El pedido 6 está Confirmado.
+GO
+
+BEGIN TRAN;
+INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+VALUES (7, 13, 1, 120000.00);
+ROLLBACK;
+-- Error 50031: No se puede vender un producto inactivo: Core i3-10100F.
+GO
+
+BEGIN TRAN;
+INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+VALUES (7, 2, 4, 650000.00);
+ROLLBACK;
+-- Error 50032: Stock insuficiente para Ryzen 7 7800X3D: disponible 3, solicitado 4.
+GO
+
+-- Si una fila falla, no se agrega ninguna (el Ryzen 5 7600 sí tenía stock)
+BEGIN TRAN;
+INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario) VALUES
+    (7, 1, 1, 285000.00),
+    (7, 2, 5, 650000.00);
+ROLLBACK;
+-- Error 50032: Stock insuficiente para Ryzen 7 7800X3D: disponible 3, solicitado 5.
+GO
+
+BEGIN TRAN;
+DELETE FROM DetallePedido WHERE IdPedido = 6;
+ROLLBACK;
+-- Error 50033: Solo se pueden quitar productos de un pedido Pendiente. El pedido 6 está Confirmado.
+GO
+
+BEGIN TRAN;
+DELETE FROM DetallePedido WHERE IdPedido = 4;
+ROLLBACK;
+-- Error 50033: ... El pedido 4 está Cancelado. (Su stock ya se repuso al cancelarlo.)
+GO
+
+SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto IN (1, 2, 3, 5, 9);
+-- Sin cambios: Ryzen 5 7600 = 9 · Ryzen 7 7800X3D = 3 · Core i5-14400F = 6 ·
+-- RX 7800 XT = 3 · NV2 = 13
+SELECT IdPedido, COUNT(*) AS Productos FROM DetallePedido WHERE IdPedido IN (4, 6, 7) GROUP BY IdPedido;
+-- Pedido 4 = 1 · pedido 6 = 2 · pedido 7 = 1
+GO
+
+-- Prueba 7: cambios de estado de los pedidos
+BEGIN TRAN;
+
+    -- Cancelar dos pedidos en un solo UPDATE: el 7 (Pendiente) y el 6 (Confirmado)
+    UPDATE Pedidos SET Estado = 'Cancelado' WHERE IdPedido IN (6, 7);
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto IN (3, 4, 9);
+    -- Core i5-14400F = 8 (6 + 2) · RTX 4060 = 5 (4 + 1) · NV2 = 15 (13 + 2)
+
+    SELECT IdPedido, IdProducto, Tipo, Origen, Cantidad
+    FROM MovimientosStock
+    WHERE IdPedido IN (6, 7) AND Origen = 'Cancelación';
+    -- 3 filas, Ingreso Cancelación: (6,3,2) · (6,9,2) · (7,4,1)
+
+    SELECT IdPedido, IdProducto FROM DetallePedido WHERE IdPedido IN (6, 7);
+    -- 3 filas: los pedidos cancelados conservan su detalle
+
+    -- Confirmar y entregar el pedido 8: no mueve el stock (ya se descontó al agregar)
+    UPDATE Pedidos SET Estado = 'Confirmado' WHERE IdPedido = 8;
+    UPDATE Pedidos SET Estado = 'Entregado' WHERE IdPedido = 8;
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 6;
+    -- Fury Beast sigue en 16
+
+    -- Corregir la dirección de un pedido Entregado: no cambia el estado ni el stock
+    UPDATE Pedidos SET DireccionEnvio = 'Av. Santa Fe 1234, Piso 2, CABA' WHERE IdPedido = 2;
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto IN (4, 10);
+    -- RTX 4060 = 5 · RM750e = 4 (sin cambios)
+
+    -- Control: el stock coincide con los movimientos
+    SELECT P.IdProducto, P.Modelo, P.Stock, ISNULL(M.Saldo, 0) AS SaldoMovimientos
+    FROM Productos AS P
+    LEFT JOIN (
+        SELECT IdProducto,
+               SUM(CASE WHEN Tipo = 'Ingreso' THEN Cantidad ELSE -Cantidad END) AS Saldo
+        FROM MovimientosStock
+        GROUP BY IdProducto
+    ) AS M ON M.IdProducto = P.IdProducto
+    WHERE P.Stock <> ISNULL(M.Saldo, 0);
+    -- 0 filas
+
+ROLLBACK;
+GO
+
+-- Prueba 8: transiciones de estado no permitidas
+BEGIN TRAN;
+UPDATE Pedidos SET Estado = 'Pendiente' WHERE IdPedido = 1;
+ROLLBACK;
+-- Error 50034 (Entregado es final)
+GO
+
+BEGIN TRAN;
+UPDATE Pedidos SET Estado = 'Cancelado' WHERE IdPedido = 1;
+ROLLBACK;
+-- Error 50034 (un pedido entregado no se puede cancelar)
+GO
+
+BEGIN TRAN;
+UPDATE Pedidos SET Estado = 'Pendiente' WHERE IdPedido = 4;
+ROLLBACK;
+-- Error 50034 (Cancelado es final: si volviera a Pendiente, se podría cancelar dos veces)
+GO
+
+BEGIN TRAN;
+UPDATE Pedidos SET Estado = 'Entregado' WHERE IdPedido = 7;
+ROLLBACK;
+-- Error 50034 (no se puede saltear Confirmado)
+GO
+
+SELECT IdPedido, Estado FROM Pedidos WHERE IdPedido IN (1, 4, 7);
+-- 1 Entregado · 4 Cancelado · 7 Pendiente
+GO
+
+-- Prueba 9: sumar y restar unidades de un producto del pedido (como en un carrito)
+-- Pedido 8 (Tomás, Pendiente) tiene 2 Fury Beast (producto 6, stock 16).
+-- Pedido 7 (Mateo, Pendiente) tiene 1 RTX 4060 (producto 4, stock 4).
+BEGIN TRAN;
+
+    -- Sumar 1 unidad: 2 -> 3
+    UPDATE DetallePedido SET Cantidad = 3 WHERE IdPedido = 8 AND IdProducto = 6;
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 6;
+    -- 15 (se descuenta solo la unidad de más)
+
+    -- Restar 2 unidades: 3 -> 1
+    UPDATE DetallePedido SET Cantidad = 1 WHERE IdPedido = 8 AND IdProducto = 6;
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 6;
+    -- 17 (se reponen las 2 de menos)
+
+    -- Varias filas en un solo UPDATE: +1 a cada producto de los pedidos 7 y 8
+    UPDATE DetallePedido SET Cantidad = Cantidad + 1 WHERE IdPedido IN (7, 8);
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto IN (4, 6);
+    -- RTX 4060 = 3 (4 - 1) · Fury Beast = 16 (17 - 1)
+
+    -- Cambiar solo el precio: no mueve el stock ni registra movimientos
+    UPDATE DetallePedido SET PrecioUnitario = 76000.00 WHERE IdPedido = 8 AND IdProducto = 6;
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 6;
+    -- Sigue en 16
+
+    SELECT Tipo, Origen, Cantidad
+    FROM MovimientosStock
+    WHERE IdPedido = 8 AND IdProducto = 6
+    ORDER BY IdMovimiento;
+    -- 4 filas: Egreso Venta 2 (de Datos.sql) · Egreso Venta 1 · Ingreso Baja de ítem 2 ·
+    -- Egreso Venta 1. El cambio de precio no agregó ninguna.
+
+    -- Producto que se da de baja con unidades ya reservadas en un pedido:
+    -- se puede reducir la cantidad y el pedido se puede confirmar igual.
+    UPDATE Productos SET Activo = 0 WHERE IdProducto = 6;
+    UPDATE DetallePedido SET Cantidad = 1 WHERE IdPedido = 8 AND IdProducto = 6;
+    SELECT IdProducto, Modelo, Stock FROM Productos WHERE IdProducto = 6;
+    -- 17 (2 -> 1: se repone 1)
+    UPDATE Pedidos SET Estado = 'Confirmado' WHERE IdPedido = 8;
+    SELECT IdPedido, Estado FROM Pedidos WHERE IdPedido = 8;
+    -- Confirmado
+
+    -- Control: el stock coincide con los movimientos
+    SELECT P.IdProducto, P.Modelo, P.Stock, ISNULL(M.Saldo, 0) AS SaldoMovimientos
+    FROM Productos AS P
+    LEFT JOIN (
+        SELECT IdProducto,
+               SUM(CASE WHEN Tipo = 'Ingreso' THEN Cantidad ELSE -Cantidad END) AS Saldo
+        FROM MovimientosStock
+        GROUP BY IdProducto
+    ) AS M ON M.IdProducto = P.IdProducto
+    WHERE P.Stock <> ISNULL(M.Saldo, 0);
+    -- 0 filas
+
+ROLLBACK;
+GO
+
+-- Prueba 10: modificaciones que deben fallar
+BEGIN TRAN;
+UPDATE DetallePedido SET Cantidad = 3 WHERE IdPedido = 6 AND IdProducto = 3;
+ROLLBACK;
+-- Error 50036: Solo se pueden modificar productos de un pedido Pendiente. El pedido 6 está Confirmado.
+GO
+
+BEGIN TRAN;
+UPDATE DetallePedido SET IdProducto = 7 WHERE IdPedido = 8 AND IdProducto = 6;
+ROLLBACK;
+-- Error 50035: No se puede cambiar el pedido ni el producto de un ítem.
+GO
+
+BEGIN TRAN;
+UPDATE DetallePedido SET Cantidad = 20 WHERE IdPedido = 8 AND IdProducto = 6;
+ROLLBACK;
+-- Error 50032: Stock insuficiente para Fury Beast 16GB DDR5 5600: disponible 16, solicitado 18 más.
+GO
+
+-- Aumentar un producto que se dio de baja (la baja también se deshace)
+BEGIN TRAN;
+UPDATE Productos SET Activo = 0 WHERE IdProducto = 6;
+UPDATE DetallePedido SET Cantidad = 3 WHERE IdPedido = 8 AND IdProducto = 6;
+ROLLBACK;
+-- Error 50031: No se puede vender un producto inactivo: Fury Beast 16GB DDR5 5600.
+GO
+
+-- Dejar la cantidad en 0: lo rechaza el CHECK (para eso se quita el producto con DELETE)
+BEGIN TRAN;
+UPDATE DetallePedido SET Cantidad = 0 WHERE IdPedido = 8 AND IdProducto = 6;
+ROLLBACK;
+-- Error 547: conflicto con la restricción CK_DetallePedido_Cantidad
+GO
+
+SELECT IdPedido, IdProducto, Cantidad FROM DetallePedido WHERE IdPedido IN (6, 8);
+-- Sin cambios: (6,3,2) · (6,9,2) · (8,6,2)
+SELECT IdProducto, Modelo, Stock, Activo FROM Productos WHERE IdProducto IN (3, 6);
+-- Core i5-14400F = 6 · Fury Beast = 16, activo
+GO
+
+-- Prueba 11 (opcional, para la defensa): dos personas al mismo tiempo.
+-- Abrir dos ventanas de consulta conectadas a UTN_Hardware.
+--   Ventana A: BEGIN TRAN;
+--              INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+--              VALUES (7, 2, 3, 650000.00);
+--   Ventana B: INSERT INTO DetallePedido (IdPedido, IdProducto, Cantidad, PrecioUnitario)
+--              VALUES (8, 2, 1, 650000.00);
+--              -> queda esperando: A tiene bloqueado el producto.
+--   Ventana A: COMMIT;
+--   Ventana B: sigue y falla con el error 50032 (disponible 0).
+--   Limpieza (ventana A): DELETE FROM DetallePedido WHERE IdPedido = 7 AND IdProducto = 2;
+
+-- =============================================================================
+-- CORRECCIONES DE LA PRIMERA ENTREGA
+-- =============================================================================
+
+-- Una factura de compra no se puede cargar dos veces (corrección de la
+-- primera entrega).
+INSERT INTO Compras (IdProveedor, NroFactura) VALUES (1, 'A-0001-00001234');
+-- Error: UQ_Compras_Proveedor_Factura (TecnoSur ya tiene esa factura, compra 1)
+
+BEGIN TRAN;
+    INSERT INTO Compras (IdProveedor, NroFactura) VALUES (2, 'A-0001-00001234');
+    -- Se acepta: es el mismo número, pero de otro proveedor (Delta Digital)
+ROLLBACK;
+
+-- El stock coincide con los movimientos (corrección de la primera entrega).
+-- Se ejecuta al final de todas las pruebas: los triggers tienen que haber
+-- mantenido sincronizados Stock y MovimientosStock.
+SELECT P.IdProducto, P.Modelo, P.Stock, ISNULL(M.Saldo, 0) AS SaldoMovimientos
+FROM Productos AS P
+LEFT JOIN (
+    SELECT IdProducto,
+           SUM(CASE WHEN Tipo = 'Ingreso' THEN Cantidad ELSE -Cantidad END) AS Saldo
+    FROM MovimientosStock
+    GROUP BY IdProducto
+) AS M ON M.IdProducto = P.IdProducto
+WHERE P.Stock <> ISNULL(M.Saldo, 0);
+-- 0 filas
+GO
